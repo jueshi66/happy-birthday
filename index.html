@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>粒子动态序列祝福</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            background-color: #000000;
+            overflow: hidden;
+            font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #intro {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #000000;
+            z-index: 10;
+            transition: opacity 1.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .start-btn {
+            padding: 16px 40px;
+            font-size: 16px;
+            color: #fff;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 6px;
+            cursor: pointer;
+            letter-spacing: 4px;
+            backdrop-filter: blur(8px);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .start-btn::after {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 50%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+            transform: skewX(-20deg);
+            transition: left 0.5s;
+        }
+
+        .start-btn:hover::after {
+            left: 150%;
+        }
+
+        .start-btn:active {
+            transform: scale(0.96);
+            background: rgba(255, 255, 255, 0.08);
+        }
+    </style>
+    <!-- GSAP 动画引擎 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+</head>
+<body>
+
+    <div id="intro">
+        <button class="start-btn" id="startBtn">点击开启惊喜</button>
+    </div>
+
+    <canvas id="stage"></canvas>
+
+    <script>
+        /**
+         * ==========================================
+         * ⚙️ 核心参数调优区
+         * ==========================================
+         */
+        const CONFIG = {
+            // [粒子密度 Density] 数值越小，像素采样越密集，粒子总数越多（建议范围: 4~7。手机端如遇卡顿请调大至 6）
+            gap: 5, 
+            
+            // [粒子大小 Radius] 粒子的基础渲染半径
+            particleSize: 1.6, 
+            
+            // [时间控制 Time] 各阶段参数 (单位: 毫秒)
+            delayBetweenStages: 3800,  // 画面停顿观察时间
+            transitionDuration: 2.2,   // 粒子散开再聚拢的变形过渡时长 (秒)
+            fireworksDuration: 4500,   // 烟花阶段持续坠落时间
+            
+            // [资源路径 Image]
+            imagePath: "./leaf.png", 
+            
+            // [视觉色彩 Colors] R, G, B 通道定义
+            colors: {
+                stage1: { r: 255, g: 215, b: 0 },    // 亮金
+                stage2: { r: 255, g: 0, b: 0 },      // 红色
+                stage3: { r: 192, g: 192, b: 192 },  // 银色
+                stage4: { r: 160, g: 32, b: 240 },   // 紫色 (玫瑰)
+                stage5: { r: 255, g: 204, b: 51 },   // 暖黄
+                stage6: { r: 144, g: 238, b: 144 },  // 淡绿
+                stage8: { r: 80, g: 200, b: 120 }    // 翠绿
+            }
+        };
+
+        /**
+         * ==========================================
+         * 渲染引擎与数据结构
+         * ==========================================
+         */
+        const canvas = document.getElementById('stage');
+        const ctx = canvas.getContext('2d');
+        const introPanel = document.getElementById('intro');
+        const startBtn = document.getElementById('startBtn');
+
+        let width, height;
+        let particles = [];
+        let animationTime = 0;
+        let isPlaying = false;
+        
+        // 物理接管标识（控制烟花重力模式与普通波浪漂浮模式的切换）
+        let isPhysicsMode = false;
+
+        // 画布响应式处理（集成视网膜屏幕适配）
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2); // 限制最大dpr防止算力溢出
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            ctx.scale(dpr, dpr);
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        class Particle {
+            constructor(x, y) {
+                this.x = x; 
+                this.y = y; 
+                this.baseX = x; 
+                this.baseY = y; 
+                this.r = 255; this.g = 255; this.b = 255;
+                this.a = 0; 
+                
+                // Fluid Motion：差异化扰动参数
+                this.seed = Math.random() * Math.PI * 2;
+                this.speed = 0.4 + Math.random() * 0.6;
+                this.amp = Math.random() * 2 + 1; // 漂浮幅度
+
+                // 物理惯性向量
+                this.vx = 0;
+                this.vy = 0;
+            }
+
+            draw() {
+                if (isPhysicsMode) {
+                    this.baseX += this.vx;
+                    this.baseY += this.vy;
+                    this.vy += 0.12; // 重力加速度 G
+                    this.vx *= 0.98; // 空气阻力
+                    this.vy *= 0.98;
+                    this.x = this.baseX;
+                    this.y = this.baseY;
+                } else {
+                    const dx = Math.sin(animationTime * this.speed + this.seed) * this.amp;
+                    const dy = Math.cos(animationTime * this.speed + this.seed) * this.amp;
+                    this.x = this.baseX + dx;
+                    this.y = this.baseY + dy;
+                }
+
+                ctx.fillStyle = `rgba(${this.r | 0}, ${this.g | 0}, ${this.b | 0}, ${this.a})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, CONFIG.particleSize, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        /**
+         * ==========================================
+         * 图像、字体与数学采样器
+         * ==========================================
+         */
+        function getTargetsFromText(textData, colorObj) {
+            const offCanvas = document.createElement('canvas');
+            const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+            offCanvas.width = width;
+            offCanvas.height = height;
+
+            const isArray = Array.isArray(textData);
+            const longestStr = isArray ? textData.reduce((a, b) => a.length > b.length ? a : b) : textData;
+            
+            // 动态字号计算矩阵，严控边界
+            let fontSize = Math.min(width / longestStr.length * 1.6, 140);
+            if (width < 768) fontSize = Math.min(width / longestStr.length * 2, 70); 
+
+            offCtx.fillStyle = '#FFF';
+            offCtx.font = `bold ${fontSize}px -apple-system, "PingFang SC", sans-serif`;
+            offCtx.textAlign = 'center';
+            offCtx.textBaseline = 'middle';
+
+            if (isArray) {
+                const lineHeight = fontSize * 1.5;
+                const startY = height / 2 - (textData.length - 1) * lineHeight / 2;
+                textData.forEach((line, i) => offCtx.fillText(line, width / 2, startY + i * lineHeight));
+            } else {
+                offCtx.fillText(textData, width / 2, height / 2);
+            }
+
+            return extractPixels(offCtx, colorObj);
+        }
+
+        function getTargetsFromShape(shapeType, colorObj) {
+            const offCanvas = document.createElement('canvas');
+            const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+            offCanvas.width = width;
+            offCanvas.height = height;
+
+            offCtx.translate(width / 2, height / 2);
+            const scale = Math.min(width, height) / 450;
+
+            if (shapeType === 'heart') {
+                offCtx.fillStyle = '#FFF';
+                offCtx.beginPath();
+                for (let t = 0; t <= Math.PI * 2; t += 0.02) {
+                    const x = 16 * Math.pow(Math.sin(t), 3);
+                    const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+                    const px = x * scale * 14;
+                    const py = y * scale * 14 - 25 * scale;
+                    t === 0 ? offCtx.moveTo(px, py) : offCtx.lineTo(px, py);
+                }
+                offCtx.fill();
+            } else if (shapeType === 'rose') {
+                // 采用玫瑰参数方程 (Rhodonea curve, k=5/2 形成重叠多瓣)
+                offCtx.strokeStyle = '#FFF';
+                offCtx.lineWidth = 12 * scale; // 粗线条以采集足够粒子
+                offCtx.lineCap = 'round';
+                offCtx.lineJoin = 'round';
+                offCtx.beginPath();
+                const n = 5, d = 2; // k = n/d
+                for (let t = 0; t <= Math.PI * 2 * d; t += 0.01) {
+                    const r = 180 * scale * Math.cos((n / d) * t);
+                    const x = r * Math.cos(t);
+                    const y = r * Math.sin(t);
+                    t === 0 ? offCtx.moveTo(x, y) : offCtx.lineTo(x, y);
+                }
+                offCtx.stroke();
+            }
+            
+            offCtx.setTransform(1, 0, 0, 1, 0, 0);
+            return extractPixels(offCtx, colorObj);
+        }
+
+        function getTargetsFromImage(imgObj, colorObj) {
+            const offCanvas = document.createElement('canvas');
+            const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+            offCanvas.width = width;
+            offCanvas.height = height;
+
+            const scale = Math.min(width * 0.7 / imgObj.width, height * 0.6 / imgObj.height, 1);
+            const dw = imgObj.width * scale;
+            const dh = imgObj.height * scale;
+            
+            offCtx.drawImage(imgObj, (width - dw) / 2, (height - dh) / 2, dw, dh);
+            return extractPixels(offCtx, colorObj);
+        }
+
+        function extractPixels(ctxObj, targetColor) {
+            const imgData = ctxObj.getImageData(0, 0, width, height).data;
+            const targets = [];
+            const gap = CONFIG.gap;
+
+            for (let y = 0; y < height; y += gap) {
+                for (let x = 0; x < width; x += gap) {
+                    const alpha = imgData[(y * width + x) * 4 + 3];
+                    if (alpha > 128) {
+                        targets.push({ x, y, r: targetColor.r, g: targetColor.g, b: targetColor.b });
+                    }
+                }
+            }
+            return targets;
+        }
+
+        function getRandomRainbow() {
+            const h = Math.random() * 360;
+            const f = (n, k = (n + h / 30) % 12) => 0.6 - 0.6 * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+            return { r: 255 * f(0), g: 255 * f(8), b: 255 * f(4) };
+        }
+
+        /**
+         * ==========================================
+         * 动画总成与编排逻辑
+         * ==========================================
+         */
+        function morphTo(targets) {
+            // 容量自适应调配
+            while (particles.length < targets.length) {
+                const sx = Math.random() > 0.5 ? -100 : width + 100;
+                const sy = Math.random() * height;
+                particles.push(new Particle(sx, sy));
+            }
+
+            // 算法打乱，确保汇聚路径具备空间交叉感
+            targets.sort(() => Math.random() - 0.5);
+
+            particles.forEach((p, i) => {
+                if (i < targets.length) {
+                    const t = targets[i];
+                    gsap.to(p, {
+                        duration: CONFIG.transitionDuration + Math.random() * 0.6,
+                        baseX: t.x,
+                        baseY: t.y,
+                        r: t.r, g: t.g, b: t.b,
+                        a: Math.random() * 0.4 + 0.6,
+                        ease: "power3.inOut"
+                    });
+                } else {
+                    gsap.to(p, {
+                        duration: 1.2,
+                        baseX: p.baseX + (Math.random() - 0.5) * 400,
+                        baseY: p.baseY + (Math.random() - 0.5) * 400,
+                        a: 0,
+                        ease: "power2.out"
+                    });
+                }
+            });
+        }
+
+        async function triggerFireworks() {
+            // 阶段一：收缩为底部火种
+            gsap.to(particles, {
+                duration: 1.2,
+                baseX: width / 2,
+                baseY: height + 20,
+                r: 255, g: 255, b: 255, a: 1,
+                ease: "power2.in"
+            });
+            await new Promise(r => setTimeout(r, 1300));
+
+            // 阶段二：发射升空
+            gsap.to(particles, {
+                duration: 0.9,
+                baseY: height * 0.25,
+                ease: "power1.out"
+            });
+            await new Promise(r => setTimeout(r, 900));
+
+            // 阶段三：物理系统接管爆炸
+            isPhysicsMode = true;
+            gsap.killTweensOf(particles); 
+
+            particles.forEach(p => {
+                const angle = Math.random() * Math.PI * 2;
+                const vel = Math.random() * 18 + 2; // 初速度分布
+                p.vx = Math.cos(angle) * vel;
+                p.vy = Math.sin(angle) * vel - 4; 
+                
+                const col = getRandomRainbow();
+                p.r = col.r; p.g = col.g; p.b = col.b;
+            });
+
+            await new Promise(r => setTimeout(r, CONFIG.fireworksDuration));
+            isPhysicsMode = false;
+        }
+
+        function render() {
+            if (!isPlaying) return;
+            animationTime += 0.035;
+            
+            // 尾迹擦除，构成运动残影
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(0, 0, width, height);
+
+            particles.forEach(p => {
+                if (p.a > 0.05) p.draw();
+            });
+
+            requestAnimationFrame(render);
+        }
+
+        function loadResource(src) {
+            return new Promise(resolve => {
+                const img = new Image();
+                img.crossOrigin = "Anonymous";
+                img.onload = () => resolve(img);
+                img.onerror = () => {
+                    // 若资源加载异常（如跨域或路径错误），采用绘制兜底图形保障主流程
+                    const fb = document.createElement('canvas');
+                    fb.width = 200; fb.height = 300;
+                    const fCtx = fb.getContext('2d');
+                    fCtx.fillStyle = '#90EE90';
+                    fCtx.beginPath();
+                    fCtx.ellipse(100, 150, 60, 120, 0, 0, Math.PI * 2);
+                    fCtx.fill();
+                    const fbImg = new Image();
+                    fbImg.onload = () => resolve(fbImg);
+                    fbImg.src = fb.toDataURL();
+                };
+                img.src = src;
+            });
+        }
+
+        async function executeSequence() {
+            const externalImg = await loadResource(CONFIG.imagePath);
+            const delay = CONFIG.delayBetweenStages;
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+
+            isPlaying = true;
+            render(); 
+
+            // 序列执行栈
+            morphTo(getTargetsFromText("2001.04.12", CONFIG.colors.stage1));
+            await wait(delay);
+
+            morphTo(getTargetsFromShape("heart", CONFIG.colors.stage2));
+            await wait(delay);
+
+            morphTo(getTargetsFromText("2026.04.12", CONFIG.colors.stage3));
+            await wait(delay);
+
+            morphTo(getTargetsFromShape("rose", CONFIG.colors.stage4));
+            await wait(delay);
+
+            morphTo(getTargetsFromText("生日快乐！", CONFIG.colors.stage5));
+            await wait(delay);
+
+            morphTo(getTargetsFromImage(externalImg, CONFIG.colors.stage6));
+            await wait(delay);
+
+            await triggerFireworks();
+
+            morphTo(getTargetsFromText(["保柚凌辉天天好运，", "事事如意"], CONFIG.colors.stage8));
+        }
+
+        // 监听事件
+        startBtn.addEventListener('click', () => {
+            introPanel.style.opacity = '0';
+            introPanel.style.pointerEvents = 'none';
+            setTimeout(() => {
+                introPanel.style.display = 'none';
+                executeSequence();
+            }, 1000);
+        });
+
+    </script>
+</body>
+</html>
