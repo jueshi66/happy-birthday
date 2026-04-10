@@ -71,11 +71,62 @@
             transform: scale(0.96);
             background: rgba(255, 255, 255, 0.08);
         }
+
+        /* 增加横屏引导层样式 */
+        #orientation-guard {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background-color: #000;
+            color: #fff;
+            z-index: 9999;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-size: 17px;
+            letter-spacing: 2px;
+            line-height: 1.8;
+            padding: 20px;
+        }
+
+        .device-icon {
+            width: 50px;
+            height: 86px;
+            border: 3px solid #fff;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            position: relative;
+            animation: rotateDevice 2s infinite ease-in-out;
+        }
+
+        @keyframes rotateDevice {
+            0% { transform: rotate(0deg); }
+            50% { transform: rotate(-90deg); }
+            100% { transform: rotate(-90deg); }
+        }
+
+        /* 竖屏状态下显示提示，强制隐藏主界面以防误触 */
+        @media screen and (orientation: portrait) {
+            #orientation-guard {
+                display: flex;
+            }
+            #intro {
+                display: none !important;
+            }
+        }
     </style>
     <!-- GSAP 动画引擎 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
 </head>
 <body>
+
+    <!-- 横屏强制提示层 -->
+    <div id="orientation-guard">
+        <div class="device-icon"></div>
+        <p>为了获得完美的视觉体验<br>请解锁屏幕方向，并将手机<b>横屏</b>放置</p>
+    </div>
 
     <div id="intro">
         <button class="start-btn" id="startBtn">点击开启惊喜</button>
@@ -84,20 +135,23 @@
     <canvas id="stage"></canvas>
 
     <script>
+        // 检测是否为移动端设备，解决报错问题
+        const isMobile = window.innerWidth < 768;
+
         /**
          * ==========================================
          * ⚙️ 核心参数调优区
          * ==========================================
          */
         const CONFIG = {
-            // [粒子密度 Density] 数值越小，像素采样越密集，粒子总数越多（建议范围: 4~7。手机端如遇卡顿请调大至 6）
-            gap: 5, 
+            // [粒子密度 Density] 手机端自动加密像素采样，维持形态清晰
+            gap: isMobile ? 4 : 5, 
             
-            // [粒子大小 Radius] 粒子的基础渲染半径
-            particleSize: 1.6, 
+            // [粒子大小 Radius] 缩小单体半径，适配密集排布
+            particleSize: isMobile ? 1.3 : 1.6, 
             
             // [时间控制 Time] 各阶段参数 (单位: 毫秒)
-            delayBetweenStages: 3800,  // 画面停顿观察时间
+            delayBetweenStages: 5800,  // 延长画面停顿观察时间，确保文字能够从容看清
             transitionDuration: 2.2,   // 粒子散开再聚拢的变形过渡时长 (秒)
             fireworksDuration: 4500,   // 烟花阶段持续坠落时间
             
@@ -200,11 +254,29 @@
             offCanvas.height = height;
 
             const isArray = Array.isArray(textData);
-            const longestStr = isArray ? textData.reduce((a, b) => a.length > b.length ? a : b) : textData;
             
-            // 动态字号计算矩阵，严控边界
-            let fontSize = Math.min(width / longestStr.length * 1.6, 140);
-            if (width < 768) fontSize = Math.min(width / longestStr.length * 2, 70); 
+            // 采用 measureText 精准测量文本实际像素宽度，摒弃单纯按字符数估算
+            let fontSize = 120;
+            offCtx.font = `bold ${fontSize}px -apple-system, "PingFang SC", sans-serif`;
+
+            let maxTextWidth = 0;
+            if (isArray) {
+                textData.forEach(str => {
+                    const w = offCtx.measureText(str).width;
+                    if (w > maxTextWidth) maxTextWidth = w;
+                });
+            } else {
+                maxTextWidth = offCtx.measureText(textData).width;
+            }
+
+            // 划定 85% 屏幕宽度的安全区，动态压平超宽文本
+            const safeWidth = width * 0.85;
+            if (maxTextWidth > safeWidth) {
+                fontSize = fontSize * (safeWidth / maxTextWidth);
+            }
+            
+            // 设定字号天花板，防止在 iPad 等宽屏设备上比例失调
+            fontSize = Math.min(fontSize, isMobile ? 65 : 120);
 
             offCtx.fillStyle = '#FFF';
             offCtx.font = `bold ${fontSize}px -apple-system, "PingFang SC", sans-serif`;
@@ -229,7 +301,9 @@
             offCanvas.height = height;
 
             offCtx.translate(width / 2, height / 2);
-            const scale = Math.min(width, height) / 450;
+            
+            // 压低形状的自适应缩放基准，确保在竖屏手机上边缘空隙充裕
+            const scale = Math.min(width * 0.8, height * 0.8) / 450;
 
             if (shapeType === 'heart') {
                 offCtx.fillStyle = '#FFF';
@@ -339,36 +413,60 @@
         }
 
         async function triggerFireworks() {
-            // 阶段一：收缩为底部火种
-            gsap.to(particles, {
-                duration: 1.2,
-                baseX: width / 2,
-                baseY: height + 20,
-                r: 255, g: 255, b: 255, a: 1,
-                ease: "power2.in"
+            // 将所有粒子随机分配到多个烟花弹中 (这里设置为 3 个)
+            const fireworkCount = 3;
+            const groups = Array.from({length: fireworkCount}, () => []);
+            
+            // 随机打乱粒子并均等分组
+            const shuffledParticles = [...particles].sort(() => Math.random() - 0.5);
+            shuffledParticles.forEach((p, i) => {
+                groups[i % fireworkCount].push(p);
+            });
+
+            // 设定 3 个烟花弹的发射基准点 (左、中、右)
+            const launchPositions = [
+                { x: width * 0.25, targetY: height * 0.3 },
+                { x: width * 0.5, targetY: height * 0.2 },
+                { x: width * 0.75, targetY: height * 0.35 }
+            ];
+
+            // 阶段一：收缩为多个底部火种
+            groups.forEach((group, i) => {
+                gsap.to(group, {
+                    duration: 1.2,
+                    baseX: launchPositions[i].x,
+                    baseY: height + 20,
+                    r: 255, g: 255, b: 255, a: 1,
+                    ease: "power2.in"
+                });
             });
             await new Promise(r => setTimeout(r, 1300));
 
-            // 阶段二：发射升空
-            gsap.to(particles, {
-                duration: 0.9,
-                baseY: height * 0.25,
-                ease: "power1.out"
+            // 阶段二：发射升空 (增加微小的随机延迟，让多个烟花错落有致，更具层次感)
+            groups.forEach((group, i) => {
+                gsap.to(group, {
+                    duration: 0.9 + Math.random() * 0.2,
+                    baseY: launchPositions[i].targetY,
+                    ease: "power1.out",
+                    delay: Math.random() * 0.2 
+                });
             });
-            await new Promise(r => setTimeout(r, 900));
+            await new Promise(r => setTimeout(r, 1200)); // 等待所有火种升空
 
             // 阶段三：物理系统接管爆炸
             isPhysicsMode = true;
             gsap.killTweensOf(particles); 
 
-            particles.forEach(p => {
-                const angle = Math.random() * Math.PI * 2;
-                const vel = Math.random() * 18 + 2; // 初速度分布
-                p.vx = Math.cos(angle) * vel;
-                p.vy = Math.sin(angle) * vel - 4; 
-                
-                const col = getRandomRainbow();
-                p.r = col.r; p.g = col.g; p.b = col.b;
+            groups.forEach(group => {
+                group.forEach(p => {
+                    const angle = Math.random() * Math.PI * 2;
+                    const vel = Math.random() * 18 + 2; // 初速度分布
+                    p.vx = Math.cos(angle) * vel;
+                    p.vy = Math.sin(angle) * vel - 4; 
+                    
+                    const col = getRandomRainbow();
+                    p.r = col.r; p.g = col.g; p.b = col.b;
+                });
             });
 
             await new Promise(r => setTimeout(r, CONFIG.fireworksDuration));
